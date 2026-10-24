@@ -161,6 +161,9 @@ canvas{image-rendering:pixelated}
 .pk-bar{height:12px;border:2px solid var(--ink);border-radius:6px;overflow:hidden;background:#fff}
 .pk-bar span{display:block;height:100%;width:100%;background:var(--pen)}
 .elev-btns{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.who-box{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.who-box canvas{width:120px;height:140px;background:linear-gradient(#bfe3ff 0 72%,#62bb61 72%);border:2px solid var(--ink);border-radius:8px}
+.rtop .cloud{font-size:13px;color:var(--muted);white-space:nowrap}
 /* result */
 .result{display:grid;justify-items:center;text-align:center;gap:12px;padding-block:10px}
 .big-stars{display:flex;gap:10px}
@@ -200,9 +203,11 @@ canvas{image-rendering:pixelated}
       <div class="me"><canvas id="hud-av" width="36" height="40"></canvas><span><b id="hud-name"></b><small id="hud-badge"></small></span></div>
       <span class="loc" id="hud-loc"></span>
       <span class="sp"></span>
+      <span class="cloud" id="hud-cloud" hidden></span>
       <span class="stars" id="hud-stars"></span>
       <button class="px-btn small go" id="hud-session"></button>
       <button class="px-btn small" id="hud-medal">勳章・寶箱</button>
+      <button class="px-btn small" id="hud-teacher" hidden>老師工具</button>
       <button class="px-btn small" id="hud-edit">換造型</button>
       <button class="px-btn small" id="hud-out">換人</button>
     </div>
@@ -229,8 +234,92 @@ function weekKey(){ const d=new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate
 const KEY = 'dongfang-keyboard-quest-v1';
 let MEM = {players:{}};
 function load(){ try{ const s = localStorage.getItem(KEY); if(s) MEM = JSON.parse(s) || MEM; }catch(e){} if(!MEM.players) MEM.players = {}; }
-function save(){ try{ localStorage.setItem(KEY, JSON.stringify(MEM)); }catch(e){} }
+function save(){ if(me) me.updated=Date.now(); try{ localStorage.setItem(KEY, JSON.stringify(MEM)); }catch(e){} markDirty(); }
 load();
+
+/* ============ cloud save (Google 試算表) ============ */
+const CLOUD_URL = 'https://script.google.com/macros/s/AKfycbyFZfdwVQcSKiVF4uCqBTWvwfXqe5wDjr3np_c8YoNfy61LGyzRa7njbuuoTGSTywBeXw/exec';   // Apps Script 網頁應用程式網址（…/exec）
+const CLOUD = { on: /^https:\/\/script\.google(usercontent)?\.com\//.test(CLOUD_URL), timer:0, busy:false, status:'', retry:0 };
+const PKEY = KEY + '-pending';
+function pendingGet(){ try{ const o=JSON.parse(localStorage.getItem(PKEY)||'null'); if(o && o.dirty && o.logs) return o; }catch(e){} return {dirty:[], logs:[]}; }
+function pendingSet(o){ try{ localStorage.setItem(PKEY, JSON.stringify(o)); }catch(e){} }
+let PEND = pendingGet();
+function cloudStatus(s){ CLOUD.status=s; const el=document.getElementById('hud-cloud'); if(el){ el.hidden=!CLOUD.on; el.textContent=s; } }
+function markDirty(){
+  if(!CLOUD.on || !me || me.teacher || !badgeNow) return;
+  if(!PEND.dirty.includes(badgeNow)) PEND.dirty.push(badgeNow);
+  pendingSet(PEND); clearTimeout(CLOUD.timer); CLOUD.timer=setTimeout(cloudFlush, 1500);
+}
+function taipeiNow(){ try{ return new Date().toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false}); }catch(e){ return new Date().toISOString(); } }
+function cloudLog(row){
+  if(!CLOUD.on || !me || me.teacher) return;
+  PEND.logs.push({time:taipeiNow(), badge:badgeNow, name:me.name, ...row});
+  markDirty();
+}
+function starsOf(p,id){ return (p.stars||{})[id]||0; }
+function summaryOf(b,p){
+  const total=ALL_LEVELS.reduce((s,l)=>s+starsOf(p,l.id),0), done=ALL_LEVELS.filter(l=>starsOf(p,l.id)>0).length;
+  const medals=Object.values(p.medals||{}).reduce((s,a)=>s+Math.min(3,a.length),0);
+  const wrong=Object.entries(p.wrong||{}).filter(([k,v])=>v>=1).sort((a,c)=>c[1]-a[1]).slice(0,3).map(([k,v])=>`${k}${SYMNAME[k]||''}×${Math.round(v)}`).join('、');
+  let next='全部完成';
+  for(const z of ZONES){ if(z.soon) continue; const l=z.levels.find(l=>starsOf(p,l.id)===0); if(l){ next=`區${z.no} ${z.bld}・${l.name}`; break; } }
+  return {badge:b, grade:b[0], name:p.name||'', total, max:ALL_LEVELS.length*3, done, levels:ALL_LEVELS.length, chests:(p.treasures||[]).length, medals, pk:(p.pkBest==null?'':p.pkBest), next, wrong};
+}
+function sessionOf(p){
+  const s=p.session; if(!s) return null;
+  const s0=s.stars0||{}, gained=ALL_LEVELS.reduce((t,l)=>t+Math.max(0,starsOf(p,l.id)-(s0[l.id]||0)),0);
+  let start=''; try{ start=new Date(s.start).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false}); }catch(e){ start=String(s.start); }
+  return {start, stars:gained, chests:(s.chests||[]).length};
+}
+async function cloudPost(body, ms=15000){
+  const ctl=new AbortController(), t=setTimeout(()=>ctl.abort(), ms);
+  try{
+    const r=await fetch(CLOUD_URL,{method:'POST', body:JSON.stringify(body), signal:ctl.signal});
+    const j=await r.json(); if(!j.ok) throw new Error(j.msg||'雲端回傳錯誤'); return j;
+  } finally { clearTimeout(t); }
+}
+async function cloudLoad(b){
+  const ctl=new AbortController(), t=setTimeout(()=>ctl.abort(), 10000);
+  try{ const r=await fetch(CLOUD_URL+'?action=load&badge='+encodeURIComponent(b),{signal:ctl.signal}); return await r.json(); }
+  finally{ clearTimeout(t); }
+}
+async function cloudFlush(){
+  if(!CLOUD.on || CLOUD.busy) return;
+  if(!PEND.dirty.length && !PEND.logs.length){ cloudStatus('☁ 已存到雲端'); return; }
+  CLOUD.busy=true; cloudStatus('☁ 存檔中…');
+  try{
+    while(PEND.dirty.length || PEND.logs.length){
+      const b = PEND.dirty[0] || PEND.logs[0].badge, p = MEM.players[b];
+      const logs = PEND.logs.filter(l=>l.badge===b).slice(0,40);
+      const body = {action:'sync', badge:b, logs};
+      if(p){ body.player=p; body.summary=summaryOf(b,p); body.session=sessionOf(p); }
+      await cloudPost(body);
+      PEND.logs = PEND.logs.filter(l=>!logs.includes(l));
+      if(!PEND.logs.some(l=>l.badge===b)) PEND.dirty = PEND.dirty.filter(x=>x!==b);
+      pendingSet(PEND);
+    }
+    CLOUD.retry=0; cloudStatus('☁ 已存到雲端');
+  }catch(e){
+    CLOUD.retry=Math.min(CLOUD.retry+1,6); cloudStatus('⚠ 暫存在這台電腦，稍後再上傳');
+    clearTimeout(CLOUD.timer); CLOUD.timer=setTimeout(cloudFlush, 8000*CLOUD.retry);
+  }finally{ CLOUD.busy=false; }
+}
+window.addEventListener('online', ()=>{ if(CLOUD.on) cloudFlush(); });
+function mergePlayers(a,b){
+  if(!a) return b||null; if(!b) return a;
+  const out={...a, ...b};
+  out.name=b.name||a.name; out.avatar=b.avatar||a.avatar;
+  out.stars={...a.stars}; for(const [k,v] of Object.entries(b.stars||{})) out.stars[k]=Math.max(v,out.stars[k]||0);
+  out.wrong={...a.wrong}; for(const [k,v] of Object.entries(b.wrong||{})) out.wrong[k]=Math.max(v,out.wrong[k]||0);
+  out.treasures=[...new Set([...(a.treasures||[]),...(b.treasures||[])])];
+  out.medals={}; for(const k of new Set([...Object.keys(a.medals||{}),...Object.keys(b.medals||{})])) out.medals[k]=[...new Set([...((a.medals||{})[k]||[]),...((b.medals||{})[k]||[])])];
+  out.reviewDay = [a.reviewDay,b.reviewDay].filter(Boolean).sort().pop()||null;
+  out.pkBest = Math.max(a.pkBest??-1, b.pkBest??-1); if(out.pkBest<0) out.pkBest=null;
+  out.session = (a.session?.start||0) > (b.session?.start||0) ? a.session : b.session;
+  return out;
+}
+setInterval(()=>{ if(CLOUD.on && (PEND.dirty.length||PEND.logs.length) && !CLOUD.busy) cloudFlush(); }, 30000);
+
 
 /* ============ symbols & keys ============ */
 const PUNCT = '，。、！？：～（）';
@@ -473,6 +562,7 @@ function loginView(){
       </div>
       <p class="muted" style="margin:0">四位數字，例如 5102、6318</p>
       <p class="err" id="login-err" role="alert"></p>
+      <p class="muted" id="login-note" style="margin:0"></p>
     </div>
   </div>`;
 }
@@ -485,18 +575,48 @@ function showLogin(){
   $('#btn-login').onclick = doLogin;
   setTimeout(()=>inp.focus(), 50);
 }
-function doLogin(){
+async function doLogin(){
+  const btn=$('#btn-login'); if(btn.disabled) return;
   const b = $('#badge').value.trim();
   if(!/^\d{4}$/.test(b)){ $('#login-err').textContent='胸牌號碼是四位數字，例如 5102。'; return; }
   if(b!=='0000' && !/^[1-6]\d{3}$/.test(b)){ $('#login-err').textContent='第一個數字是年級（1～6），再檢查一次胸牌喔。'; return; }
-  badgeNow = b; me = MEM.players[b];
-  if(!me){ me = MEM.players[b] = {name:'', avatar:{...DEFAULT_LOOK}, stars:{}, wrong:{}, medals:{}, reviewDay:null, created:Date.now(), teacher:b==='0000'}; showCreator(true); }
-  else {
-    if(!me.avatar || typeof me.avatar.hair==='number') { me.avatar = {...DEFAULT_LOOK}; save(); }
-    enterGame(true);
+  badgeNow = b;
+  if(b==='0000'){
+    me = MEM.players[b] = MEM.players[b] || {name:'', avatar:{...DEFAULT_LOOK}, stars:{}, wrong:{}, medals:{}, reviewDay:null, created:Date.now(), teacher:true};
+    me.name ? enterGame(true) : showCreator(true); return;
   }
+  let cloudP=null, resetAt=0, offline=false;
+  if(CLOUD.on){
+    btn.disabled=true; $('#login-err').textContent=''; $('#login-note').textContent='正在讀取雲端進度…';
+    try{ const r=await cloudLoad(b); if(r && r.ok){ cloudP=r.player||null; resetAt=Number(r.resetAt)||0; } else offline=true; }catch(e){ offline=true; }
+    btn.disabled=false;
+    $('#login-note').textContent = offline ? '連不上雲端，這次的進度會先存在這台電腦，連上網路後會自動上傳。' : '';
+    if(offline) cloudStatus('⚠ 暫存在這台電腦，稍後再上傳');
+  }
+  let local=MEM.players[b];
+  if(local && resetAt && (local.updated||local.created||0) < resetAt) local=null;
+  const p=mergePlayers(local, cloudP);
+  if(!p || !p.name){
+    me = MEM.players[b] = {name:'', avatar:{...DEFAULT_LOOK}, stars:{}, wrong:{}, medals:{}, reviewDay:null, created:Date.now(), teacher:false};
+    showCreator(true); return;
+  }
+  if(!p.avatar || typeof p.avatar.hair==='number') p.avatar={...DEFAULT_LOOK};
+  confirmWho(b,p);
 }
-
+function confirmWho(b,p){
+  const st=ALL_LEVELS.reduce((s,l)=>s+starsOf(p,l.id),0);
+  $('#app').innerHTML = `<div class="page">
+    <div class="kicker">胸牌 ${b}</div>
+    <h1 style="font-size:clamp(28px,6vw,40px)">你是「${esc(p.name)}」嗎？</h1>
+    <div class="box who-box"><canvas id="who-cv" width="120" height="140"></canvas>
+      <div><div style="font-family:var(--display);font-size:26px">${esc(p.name)}</div><div class="muted" style="font-family:var(--mono)">胸牌 ${b}・★ ${st} 顆星・寶箱 ${(p.treasures||[]).length}</div></div></div>
+    <p class="muted" style="margin:0">如果這不是你，代表胸牌號碼打錯了，請按「不是我」重新輸入。</p>
+    <div class="actions"><button class="px-btn go" id="who-yes" style="font-size:20px">是我，出發！</button><button class="px-btn" id="who-no">不是我，重新輸入</button></div></div>`;
+  const c=$('#who-cv').getContext('2d'); c.imageSmoothingEnabled=false; drawPerson(c,4,136,7,p.avatar,{noShadow:1,mood:'ok'});
+  $('#who-yes').onclick=()=>{ me=MEM.players[b]=p; save(); enterGame(true); };
+  $('#who-no').onclick=()=>{ badgeNow=null; me=null; showLogin(); };
+  setTimeout(()=>$('#who-yes')?.focus(),30);
+}
 let draft = null, creatorTimer = 0, creatorNew = false;
 function showCreator(isNew){
   creatorNew = isNew; draft = {...me.avatar};
@@ -1320,6 +1440,9 @@ function renderHud(){
   $('#hud-stars').textContent = `★ ${totalStars()} / ${ALL_LEVELS.length*3}`;
   $('#hud-session').textContent = `本節 +${sessionStars()}★・寶箱 ${(me.session?.chests||[]).length}`;
   $('#hud-loc').textContent = M ? M.name : '';
+  $('#hud-teacher').hidden = !me.teacher;
+  cloudStatus(CLOUD.status || (CLOUD.on && !me.teacher ? '☁ 已連上雲端' : ''));
+  if(me.teacher && CLOUD.on) cloudStatus('☁ 老師預覽不存檔');
   const tg=nextTarget();
   if(tg){ const h=HOST[tg.id]; $('#qt').textContent = `到${h.loc}找${h.name}，挑戰「${tg.name}」`; }
   else $('#qt').textContent = '目前開放的關卡都過了！去補滿星星、找寶箱、踢足球，或到前庭布告欄做今日複習';
@@ -1507,6 +1630,34 @@ $('#hud-medal').onclick = ()=>{ if(G.state==='dialog' && run) return;
   $('#sh-close').onclick = closeSheet; };
 $('#hud-session').onclick = ()=>{ if(G.state==='dialog' && run) return; openSessionSheet(); };
 $('#hud-edit').onclick = ()=>{ if(run) return; showCreator(false); };
+$('#hud-teacher').onclick = ()=>{ if(run) return; openTeacherSheet(); };
+$('#hud-out').onclick = ()=>{ if(CLOUD.on) cloudFlush(); run=null; pk=null; me=null; badgeNow=null; $('#dlg').hidden=true; showLogin(); };
+function openTeacherSheet(){
+  openSheet(`<div class="sheet-head"><div><div class="kicker">老師工具</div><h2>重置學生進度</h2>
+      <p>${CLOUD.on?'輸入胸牌號碼和老師密碼（Apps Script 程式裡的 TEACHER_PIN），會清除這位學生在雲端和這台電腦上的進度。試算表裡的「關卡紀錄」會保留。':'目前沒有接上雲端，只會清除這台電腦上的紀錄。'}</p></div>
+      <button class="px-btn small" id="sh-close">✕ 關閉</button></div>
+    <div class="box" style="display:grid;gap:12px">
+      <label style="display:grid;gap:4px">胸牌號碼<input id="t-badge" class="name-input" maxlength="4" inputmode="numeric" autocomplete="off"></label>
+      ${CLOUD.on?'<label style="display:grid;gap:4px">老師密碼<input id="t-pin" class="name-input" type="password" autocomplete="off"></label>':''}
+      <div class="actions"><button class="px-btn go" id="t-reset">重置這位學生</button><span id="t-msg" class="muted"></span></div>
+    </div>`);
+  $('#sh-close').onclick=closeSheet;
+  let armed=false;
+  $('#t-reset').onclick=async()=>{
+    const b=$('#t-badge').value.trim(), msg=$('#t-msg'), btn=$('#t-reset');
+    if(!/^[1-6]\d{3}$/.test(b)){ msg.textContent='請輸入正確的四位數胸牌號碼。'; return; }
+    if(!armed){ armed=true; btn.textContent=`確定重置 ${b}？再按一次`; return; }
+    armed=false; btn.textContent='重置這位學生';
+    if(CLOUD.on){
+      msg.textContent='重置中…';
+      try{ await cloudPost({action:'reset', badge:b, pin:$('#t-pin').value}); }
+      catch(e){ msg.textContent='雲端重置失敗：'+(e.message||e); return; }
+    }
+    delete MEM.players[b]; PEND.dirty=PEND.dirty.filter(x=>x!==b); PEND.logs=PEND.logs.filter(l=>l.badge!==b); pendingSet(PEND);
+    try{ localStorage.setItem(KEY, JSON.stringify(MEM)); }catch(e){}
+    msg.textContent=`已重置 ${b}。下次登入會重新捏人偶、從頭開始。`;
+  };
+}
 function openSessionSheet(){
   const s0=me.session?.stars0||{}, mins=Math.max(1,Math.round((Date.now()-(me.session?.start||Date.now()))/60000));
   const rows = ALL_LEVELS.filter(l=>stars(l.id)>(s0[l.id]||0)).map(l=>`<li><span class="tag t-${l.t}">${TYPE_LABEL[l.t]}</span> ${esc(l.name)}　<span style="font-family:var(--mono);color:var(--gold-dk)">${starText(s0[l.id]||0)} → ${starText(stars(l.id))}</span>　<b>+${stars(l.id)-(s0[l.id]||0)}</b></li>`).join('');
@@ -1757,6 +1908,7 @@ function finish(){
   const prev=stars(lv.id), best=Math.max(prev,s);
   const wasOpen = ZONES.map(z=>zoneOpen(z));
   me.stars[lv.id]=best; save();
+  cloudLog({type:'關卡', zone:`區${lv.zone.no} ${lv.zone.bld}`, level:lv.name, kind:TYPE_LABEL[lv.t], stars:s, best, right, total, hint:run.hintUsed?'是':'否', wrong:[...new Set(run.items.filter(it=>run.score[it.uid]===false).flatMap(itemSyms))].join(' ')});
   const z=lv.zone, i=z.levels.indexOf(lv), nxt=z.levels[i+1];
   const newly = ZONES.find((zz,k)=>!wasOpen[k] && zoneOpen(zz));
   const nextZone = ZONES[ZONES.indexOf(z)+1];
@@ -1790,6 +1942,7 @@ function finishReview(right,total){
     if(ok && run.counts){ const arr=me.medals[it.sym]=me.medals[it.sym]||[]; if(!arr.includes(wk)){ const b=Math.min(arr.length,3); arr.push(wk); const a=Math.min(arr.length,3); if(a>b) gains.push([it.sym,a]); } }
     return `<span class="rv-item ${ok?'ok':'no'}">${it.ans}　${ok?'記得':'忘了'}</span>`; }).join('');
   const counted = run.counts; save();
+  cloudLog({type:'今日複習', zone:'前庭布告欄', level:'今日複習挑戰', kind:counted?'計分':'練習', stars:'', best:'', right, total, hint:'否', wrong:run.items.filter(it=>run.score[it.uid]!==true).map(it=>it.ans).join(' ')});
   const gainTxt = gains.map(([s,l])=>`${s==='（）'?'括號':SYMNAME[s]}升級為${['','銅','銀','金'][l]}牌`).join('、');
   openSheet(`<div class="result"><h2>複習完成</h2>
     <p style="font-size:19px">記得 ${right} / ${total} 個符號</p>
